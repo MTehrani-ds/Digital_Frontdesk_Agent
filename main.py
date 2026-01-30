@@ -4,6 +4,13 @@ from typing import Optional, Dict, Any, List, Literal
 from datetime import datetime
 import uuid
 
+from fastapi.responses import HTMLResponse
+
+@app.get("/", response_class=HTMLResponse)
+def chat_ui():
+    with open("chat.html", "r", encoding="utf-8") as f:
+        return f.read()
+
 app = FastAPI(title="Dental Agent v1")
 
 # -----------------------------
