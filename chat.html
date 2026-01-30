@@ -6,202 +6,17 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 
   <style>
+    * { box-sizing: border-box; }
+
     body {
       margin: 0;
-      padding: 0;
       font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
       background: #f3f4f6;
-      display: flex;
-      justify-content: center;
-      align-items: center;
       height: 100vh;
-    }
-<!-- chat.html -->
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <title>Digital Frontdesk – Patient Chat</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-
-  <style>
-    body {
-      margin: 0;
-      padding: 0;
-      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
-      background: #f3f4f6;
       display: flex;
-      justify-content: center;
       align-items: center;
-      height: 100vh;
+      justify-content: center;
     }
-    .chat-wrapper {
-      width: 420px;
-      height: 640px;
-      background: #ffffff;
-      border-radius: 12px;
-      box-shadow: 0 8px 30px rgba(0,0,0,0.12);
-      display: flex;
-      flex-direction: column;
-      overflow: hidden;
-    }
-    .chat-header {
-      padding: 16px;
-      border-bottom: 1px solid #e5e7eb;
-    }
-    .chat-header h1 {
-      font-size: 16px;
-      margin: 0 0 4px 0;
-    }
-    .chat-header p {
-      font-size: 12px;
-      color: #6b7280;
-      margin: 0;
-    }
-    .messages {
-      flex: 1;
-      padding: 16px;
-      overflow-y: auto;
-      background: #fafafa;
-    }
-    .message {
-      max-width: 80%;
-      margin-bottom: 12px;
-      padding: 10px 12px;
-      border-radius: 12px;
-      font-size: 14px;
-      line-height: 1.4;
-      white-space: pre-wrap;
-    }
-    .frontdesk {
-      background: #ffffff;
-      border: 1px solid #e5e7eb;
-      align-self: flex-start;
-    }
-    .user {
-      background: #e0f2fe;
-      align-self: flex-end;
-    }
-    .timestamp {
-      font-size: 10px;
-      color: #9ca3af;
-      margin-top: 2px;
-    }
-    .input-area {
-      display: flex;
-      border-top: 1px solid #e5e7eb;
-      padding: 8px;
-      background: #ffffff;
-    }
-    .input-area input {
-      flex: 1;
-      padding: 10px;
-      border: 1px solid #d1d5db;
-      border-radius: 8px;
-      font-size: 14px;
-      outline: none;
-    }
-    .input-area button {
-      margin-left: 8px;
-      padding: 0 16px;
-      border: none;
-      border-radius: 8px;
-      background: #2563eb;
-      color: white;
-      font-size: 14px;
-      cursor: pointer;
-    }
-    .input-area button:hover {
-      background: #1d4ed8;
-    }
-  </style>
-</head>
-<body>
-
-<div class="chat-wrapper">
-  <div class="chat-header">
-    <h1>Digital Frontdesk – Patient Chat</h1>
-    <p>Demo: policy-first dental clinic assistant (no medical advice). Collects callback details and creates a staff ticket.</p>
-  </div>
-
-  <div class="messages" id="messages"></div>
-
-  <div class="input-area">
-    <input id="input" placeholder="Type your message…" />
-    <button onclick="sendMessage()">Send</button>
-  </div>
-</div>
-
-<script>
-  const sessionId = "demo-" + Math.random().toString(36).slice(2);
-  let state = null;
-
-  function timeNow() {
-    return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  }
-
-  function addMessage(text, role) {
-    const messages = document.getElementById("messages");
-
-    const bubble = document.createElement("div");
-    bubble.className = "message " + role;
-    bubble.textContent = text;
-
-    const time = document.createElement("div");
-    time.className = "timestamp";
-    time.textContent = (role === "user" ? "You" : "Frontdesk") + " · " + timeNow();
-
-    messages.appendChild(bubble);
-    messages.appendChild(time);
-    messages.scrollTop = messages.scrollHeight;
-  }
-
-  async function sendMessage() {
-    const input = document.getElementById("input");
-    const text = input.value.trim();
-    if (!text) return;
-
-    addMessage(text, "user");
-    input.value = "";
-
-    try {
-      const response = await fetch("/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          session_id: sessionId,
-          user_message: text,
-          prior_state: state
-        })
-      });
-
-      if (!response.ok) {
-        addMessage("Sorry — something went wrong on our side. Please try again.", "frontdesk");
-        return;
-      }
-
-      const data = await response.json();
-      state = data.state;
-      addMessage(data.reply_text, "frontdesk");
-
-      if (data.ticket_id) {
-        console.log("Ticket created:", data.ticket_id);
-      }
-    } catch (err) {
-      console.error(err);
-      addMessage("Network error. Please check your connection.", "frontdesk");
-    }
-  }
-
-  addMessage("Hi! I’m the clinic front desk assistant. How can I help you today?", "frontdesk");
-
-  document.getElementById("input").addEventListener("keydown", function (e) {
-    if (e.key === "Enter") sendMessage();
-  });
-</script>
-
-</body>
-</html>
 
     .chat-wrapper {
       width: 420px;
@@ -228,6 +43,7 @@
       font-size: 12px;
       color: #6b7280;
       margin: 0;
+      line-height: 1.3;
     }
 
     .messages {
@@ -238,13 +54,14 @@
     }
 
     .message {
-      max-width: 80%;
-      margin-bottom: 12px;
+      max-width: 82%;
+      margin-bottom: 8px;
       padding: 10px 12px;
       border-radius: 12px;
       font-size: 14px;
       line-height: 1.4;
       white-space: pre-wrap;
+      word-break: break-word;
     }
 
     .frontdesk {
@@ -261,19 +78,23 @@
     .timestamp {
       font-size: 10px;
       color: #9ca3af;
-      margin-top: 2px;
+      margin: 0 0 12px 0;
     }
+
+    .timestamp.frontdesk-ts { text-align: left; }
+    .timestamp.user-ts { text-align: right; }
 
     .input-area {
       display: flex;
+      gap: 8px;
       border-top: 1px solid #e5e7eb;
-      padding: 8px;
+      padding: 10px;
       background: #ffffff;
     }
 
     .input-area input {
       flex: 1;
-      padding: 10px;
+      padding: 10px 12px;
       border: 1px solid #d1d5db;
       border-radius: 8px;
       font-size: 14px;
@@ -281,7 +102,6 @@
     }
 
     .input-area button {
-      margin-left: 8px;
       padding: 0 16px;
       border: none;
       border-radius: 8px;
@@ -296,94 +116,88 @@
     }
   </style>
 </head>
+
 <body>
+  <div class="chat-wrapper">
+    <div class="chat-header">
+      <h1>Digital Frontdesk – Patient Chat</h1>
+      <p>Demo: policy-first dental clinic assistant (no medical advice). Collects callback details and creates a staff ticket.</p>
+    </div>
 
-<div class="chat-wrapper">
-  <div class="chat-header">
-    <h1>Digital Frontdesk – Patient Chat</h1>
-    <p>Demo: policy-first dental clinic assistant (no medical advice). Collects callback details and creates a staff ticket.</p>
+    <div class="messages" id="messages"></div>
+
+    <div class="input-area">
+      <input id="input" placeholder="Type your message…" autocomplete="off" />
+      <button id="sendBtn" type="button">Send</button>
+    </div>
   </div>
 
-  <div class="messages" id="messages"></div>
+  <script>
+    const sessionId = "demo-" + Math.random().toString(36).slice(2);
+    let state = null;
 
-  <div class="input-area">
-    <input id="input" placeholder="Type your message…" />
-    <button onclick="sendMessage()">Send</button>
-  </div>
-</div>
-
-<script>
-  const sessionId = "demo-" + Math.random().toString(36).slice(2);
-  let state = null;
-
-  function timeNow() {
-    return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  }
-
-  function addMessage(text, role) {
-    const messages = document.getElementById("messages");
-
-    const bubble = document.createElement("div");
-    bubble.className = "message " + role;
-    bubble.textContent = text;
-
-    const time = document.createElement("div");
-    time.className = "timestamp";
-    time.textContent = (role === "user" ? "You" : "Frontdesk") + " · " + timeNow();
-
-    messages.appendChild(bubble);
-    messages.appendChild(time);
-    messages.scrollTop = messages.scrollHeight;
-  }
-
-  async function sendMessage() {
-    const input = document.getElementById("input");
-    const text = input.value.trim();
-    if (!text) return;
-
-    addMessage(text, "user");
-    input.value = "";
-
-    try {
-      const response = await fetch("/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          session_id: sessionId,
-          user_message: text,
-          prior_state: state
-        })
-      });
-
-      if (!response.ok) {
-        addMessage("Sorry — something went wrong on our side. Please try again.", "frontdesk");
-        return;
-      }
-
-      const data = await response.json();
-      state = data.state;
-
-      addMessage(data.reply_text, "frontdesk");
-
-      // Optional debug (console only)
-      if (data.ticket_id) {
-        console.log("Ticket created:", data.ticket_id);
-      }
-
-    } catch (err) {
-      console.error(err);
-      addMessage("Network error. Please check your connection.", "frontdesk");
+    function timeNow() {
+      return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     }
-  }
 
-  // Initial greeting
-  addMessage("Hi! I’m the clinic front desk assistant. How can I help you today?", "frontdesk");
+    function addMessage(text, role) {
+      const messages = document.getElementById("messages");
 
-  // Enter = send
-  document.getElementById("input").addEventListener("keydown", function (e) {
-    if (e.key === "Enter") sendMessage();
-  });
-</script>
+      const bubble = document.createElement("div");
+      bubble.className = "message " + role;
+      bubble.textContent = text;
 
+      const ts = document.createElement("div");
+      ts.className = "timestamp " + (role === "user" ? "user-ts" : "frontdesk-ts");
+      ts.textContent = (role === "user" ? "You" : "Frontdesk") + " · " + timeNow();
+
+      messages.appendChild(bubble);
+      messages.appendChild(ts);
+      messages.scrollTop = messages.scrollHeight;
+    }
+
+    async function sendMessage() {
+      const input = document.getElementById("input");
+      const text = input.value.trim();
+      if (!text) return;
+
+      addMessage(text, "user");
+      input.value = "";
+
+      try {
+        const response = await fetch("/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            session_id: sessionId,
+            user_message: text,
+            prior_state: state
+          })
+        });
+
+        if (!response.ok) {
+          addMessage("Sorry — something went wrong on our side. Please try again.", "frontdesk");
+          return;
+        }
+
+        const data = await response.json();
+        state = data.state;
+
+        addMessage(data.reply_text, "frontdesk");
+
+        if (data.ticket_id) console.log("Ticket created:", data.ticket_id);
+      } catch (err) {
+        console.error(err);
+        addMessage("Network error. Please check your connection.", "frontdesk");
+      }
+    }
+
+    document.getElementById("sendBtn").addEventListener("click", sendMessage);
+    document.getElementById("input").addEventListener("keydown", (e) => {
+      if (e.key === "Enter") sendMessage();
+    });
+
+    addMessage("Hi! I’m the clinic front desk assistant. How can I help you today?", "frontdesk");
+  </script>
 </body>
 </html>
