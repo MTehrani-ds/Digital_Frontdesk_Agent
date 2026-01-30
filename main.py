@@ -1,14 +1,12 @@
 from fastapi import FastAPI
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from typing import Optional, Dict, Any, List, Literal
 from datetime import datetime
 import uuid
+import os
 
-from fastapi.responses import HTMLResponse
-
-
-
-app = FastAPI(title="Dental Agent v1")
+app = FastAPI(title="Digital Frontdesk – Agent v1")
 
 # -----------------------------
 # In-memory stores (demo)
@@ -41,10 +39,10 @@ class ChatResponse(BaseModel):
 # -----------------------------
 DEFAULT_STATE = {
     "step": "TRIAGE",  # TRIAGE -> COLLECT_CONTACT -> READY_TO_HANDOFF -> LIMITED_RESPONSE
-    "intent": None,    # e.g. PRICING, INSURANCE, SERVICES, EMERGENCY, MEDICAL_ADVICE
-    "procedure": None, # e.g. implant, cleaning, filling
-    "topic": None,     # short phrase: "Implant pricing", "Insurance coverage", "Emergency pain"
-    "details": [],     # list of user facts / key utterances
+    "intent": None,    # PRICING, INSURANCE, SERVICES, EMERGENCY, MEDICAL_ADVICE, OPENING_HOURS
+    "procedure": None, # implant, cleaning, filling...
+    "topic": None,     # short phrase: "Implant pricing", "Insurance question" ...
+    "details": [],     # list of user utterances (evidence trail)
     "collected": {
         "name": None,
         "phone": None,
@@ -85,33 +83,35 @@ def save_state(session_id: str, state: Dict[str, Any]) -> None:
 def classify_intent_and_procedure(text: str) -> Dict[str, Optional[str]]:
     t = text.lower().strip()
 
-    # Intent
+    # Intent detection
     if any(x in t for x in ["antibiotic", "antibiotics", "amoxicillin", "penicillin"]):
         intent = "MEDICAL_ADVICE"
     elif any(x in t for x in ["emergency", "severe pain", "bleeding", "swollen", "swelling", "urgent"]):
         intent = "EMERGENCY"
-    elif "insurance" in t or "public insurance" in t or "private" in t:
+    elif any(x in t for x in ["opening", "opening hours", "open hours", "working hours", "hours", "when are you open"]):
+        intent = "OPENING_HOURS"
+    elif "insurance" in t or "public insurance" in t or "private pay" in t or "private insurance" in t:
         intent = "INSURANCE"
-    elif any(x in t for x in ["price", "cost", "how much", "pricing"]):
+    elif any(x in t for x in ["price", "cost", "how much", "pricing", "fee"]):
         intent = "PRICING"
     elif any(x in t for x in ["do you offer", "services", "what do you do", "offer"]):
         intent = "SERVICES"
     else:
         intent = None
 
-    # Procedure
+    # Procedure detection
     procedure = None
     if "implant" in t or "implants" in t:
         procedure = "implant"
     elif "cleaning" in t:
         procedure = "cleaning"
-    elif "filling" in t:
+    elif "filling" in t or "cavity" in t:
         procedure = "filling"
     elif "root canal" in t:
         procedure = "root_canal"
     elif "crown" in t or "bridge" in t:
         procedure = "crown_bridge"
-    elif "check" in t or "consult" in t:
+    elif "check" in t or "consult" in t or "consultation" in t:
         procedure = "consultation"
 
     return {"intent": intent, "procedure": procedure}
@@ -119,29 +119,34 @@ def classify_intent_and_procedure(text: str) -> Dict[str, Optional[str]]:
 
 def update_collected_from_text(state: Dict[str, Any], text: str) -> Dict[str, Any]:
     """
-    Replace this with your working extraction.
+    Replace with your working extraction.
     Keep it deterministic: only fill fields when confidently detected.
     """
     t = text.strip()
+    low = t.lower()
 
-    # SUPER naive examples:
     # Name: "My name is Ali"
-    if state["collected"]["name"] is None and "my name is" in t.lower():
-        name = t.split("is", 1)[1].strip()
-        if 1 <= len(name) <= 60:
+    if state["collected"]["name"] is None and ("my name is" in low or "i am " in low):
+        if "my name is" in low:
+            name = t.split("is", 1)[1].strip()
+        else:
+            # crude: "I am Ali"
+            name = t.split("am", 1)[1].strip()
+        if 1 <= len(name) <= 60 and all(ch.isalpha() or ch in " -'" for ch in name):
             state["collected"]["name"] = name
 
-    # Phone: look for digits (demo)
+    # Phone: digits (demo)
     if state["collected"]["phone"] is None:
-        digits = "".join(ch for ch in t if ch.isdigit() or ch in "+")
+        digits = "".join(ch for ch in t if ch.isdigit() or ch == "+")
         if len("".join(ch for ch in digits if ch.isdigit())) >= 8:
             state["collected"]["phone"] = digits
 
-    # Best time: keywords
+    # Best time: basic keywords
     if state["collected"]["best_time"] is None:
-        low = t.lower()
-        if any(x in low for x in ["morning", "afternoon", "evening", "tomorrow", "today", "monday", "tuesday",
-                                  "wednesday", "thursday", "friday", "saturday", "sunday"]):
+        if any(x in low for x in [
+            "morning", "afternoon", "evening", "tomorrow", "today",
+            "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"
+        ]):
             state["collected"]["best_time"] = t.strip()
 
     return state
@@ -150,45 +155,13 @@ def update_collected_from_text(state: Dict[str, Any], text: str) -> Dict[str, An
 # -----------------------------
 # Ticketing (tool target)
 # -----------------------------
-def upsert_ticket(session_id: str, state: Dict[str, Any]) -> str:
-    """
-    Create or update one ticket per session for demo.
-    The key improvement: ticket includes WHAT the user asked + summary.
-    """
-    # Find existing ticket
-    existing = None
-    for tid, t in TICKETS.items():
-        if t.get("session_id") == session_id:
-            existing = tid
-            break
-
-    ticket_id = existing or str(uuid.uuid4())[:8]
-
-    # Build summary fields
-    topic = state.get("topic") or infer_topic(state)
-    summary = build_summary(state)
-
-    ticket = {
-        "ticket_id": ticket_id,
-        "session_id": session_id,
-        "created_at": TICKETS.get(ticket_id, {}).get("created_at") or now_iso(),
-        "updated_at": now_iso(),
-        "intent": state.get("intent"),
-        "procedure": state.get("procedure"),
-        "topic": topic,
-        "summary": summary,
-        "contact": state.get("collected", {}),
-        "conversation_facts": state.get("details", [])[-10:],  # last 10 key lines
-        "status": "open" if state.get("step") != "RESOLVED" else "closed",
-    }
-
-    TICKETS[ticket_id] = ticket
-    return ticket_id
-
-
 def infer_topic(state: Dict[str, Any]) -> str:
     intent = state.get("intent")
     proc = state.get("procedure")
+
+    if intent == "OPENING_HOURS":
+        return "Opening hours"
+
     if intent == "PRICING" and proc:
         return f"{proc.title()} pricing"
     if intent == "INSURANCE" and proc:
@@ -220,6 +193,40 @@ def build_summary(state: Dict[str, Any]) -> str:
     return "\n".join(parts).strip()
 
 
+def upsert_ticket(session_id: str, state: Dict[str, Any]) -> str:
+    """
+    Create or update one ticket per session for demo.
+    Ticket includes WHAT the user asked + summary.
+    """
+    existing = None
+    for tid, t in TICKETS.items():
+        if t.get("session_id") == session_id:
+            existing = tid
+            break
+
+    ticket_id = existing or str(uuid.uuid4())[:8]
+
+    topic = state.get("topic") or infer_topic(state)
+    summary = build_summary(state)
+
+    ticket = {
+        "ticket_id": ticket_id,
+        "session_id": session_id,
+        "created_at": TICKETS.get(ticket_id, {}).get("created_at") or now_iso(),
+        "updated_at": now_iso(),
+        "intent": state.get("intent"),
+        "procedure": state.get("procedure"),
+        "topic": topic,
+        "summary": summary,
+        "contact": state.get("collected", {}),
+        "conversation_facts": state.get("details", [])[-10:],
+        "status": "open" if state.get("step") != "RESOLVED" else "closed",
+    }
+
+    TICKETS[ticket_id] = ticket
+    return ticket_id
+
+
 # -----------------------------
 # Tools + Agent Runner
 # -----------------------------
@@ -236,11 +243,10 @@ class Tools:
         return ToolResult(ok=True, data={"ticket_id": tid})
 
     def notify_staff(self, session_id: str, state: Dict[str, Any], ticket_id: Optional[str] = None, **kwargs) -> ToolResult:
-        # For demo: just log in result. Replace with Slack/webhook/email later.
+        # Demo: log-only. Replace with Slack/webhook/email later.
         return ToolResult(ok=True, data={"notified": True, "ticket_id": ticket_id})
 
     def handoff_if_needed(self, session_id: str, state: Dict[str, Any], **kwargs) -> ToolResult:
-        # For v1: this tool doesn't do much; the "handoff" is mostly handled by reply logic.
         return ToolResult(ok=True, data={"handoff_checked": True})
 
 
@@ -253,6 +259,7 @@ class AgentRunner:
         for a in actions:
             typ: str = a.get("type")
             params: Dict[str, Any] = a.get("params", {})
+
             if typ == "upsert_ticket":
                 res = self.tools.upsert_ticket(session_id=session_id, state=state, **params)
             elif typ == "notify_staff":
@@ -268,25 +275,25 @@ class AgentRunner:
 
 agent = AgentRunner()
 
+
 # -----------------------------
-# Planner (this is the "agent brain")
+# Planner (agent brain)
 # -----------------------------
 def plan_actions(state: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
     Agent v1 planning rules:
-    - Always upsert ticket once we have any meaningful intent/procedure/topic or once contact info starts appearing.
-    - Notify staff only when ready_to_handoff OR emergency/medical advice.
+    - Create/update ticket for meaningful clinical/admin intents (NOT opening hours).
+    - Notify staff only for READY_TO_HANDOFF or EMERGENCY / MEDICAL_ADVICE.
     """
     actions = []
-
     intent = state.get("intent")
     proc = state.get("procedure")
     collected = state.get("collected", {})
     has_contact_signal = any(collected.get(k) for k in ["name", "phone", "best_time"])
-
     meaningful = bool(intent or proc or state.get("topic") or state.get("details"))
 
-    if meaningful or has_contact_signal:
+    # Do NOT create tickets for simple informational intents like opening hours
+    if intent != "OPENING_HOURS" and (meaningful or has_contact_signal):
         actions.append({"type": "upsert_ticket", "params": {}})
 
     if intent in ["EMERGENCY", "MEDICAL_ADVICE"]:
@@ -303,51 +310,53 @@ def plan_actions(state: Dict[str, Any]) -> List[Dict[str, Any]]:
 # Reply policy (safe + relevant)
 # -----------------------------
 def next_reply(state: Dict[str, Any], user_text: str) -> str:
-    """
-    Keep this deterministic and domain-safe.
-    Key fix vs earlier behavior: reply MUST reflect user intent/procedure first,
-    not immediately default to callback collection.
-    """
     intent = state.get("intent")
     proc = state.get("procedure")
+
+    # Opening hours (read-only info)
+    if intent == "OPENING_HOURS":
+        state["step"] = "TRIAGE"
+        return (
+            "Our typical opening hours are:\n"
+            "Monday–Friday: 09:00–18:00\n"
+            "Saturday: 09:00–13:00\n"
+            "Sunday: Closed\n\n"
+            "Would you like to book an appointment or request a callback?"
+        )
 
     # Safety: medical advice / antibiotics
     if intent == "MEDICAL_ADVICE":
         state["step"] = "LIMITED_RESPONSE"
         return (
-            "I can’t safely advise on antibiotics over chat. "
-            "Antibiotics are only appropriate after a clinician assesses your symptoms and history.\n\n"
-            "If you’re having fever, facial swelling, trouble swallowing/breathing, or severe pain, "
-            "please seek urgent care immediately.\n\n"
-            "If you want, share your name + phone number and we can arrange a clinician callback."
+            "I can’t safely advise on antibiotics over chat. Antibiotics are only appropriate after a clinician "
+            "assesses your symptoms and history.\n\n"
+            "If you have fever, facial swelling, trouble swallowing/breathing, or severe pain, please seek urgent care.\n\n"
+            "If you share your name + phone number, we can arrange a clinician callback."
         )
 
     # Emergency
     if intent == "EMERGENCY":
         state["step"] = "READY_TO_HANDOFF"
         return (
-            "If this is severe pain, swelling, uncontrolled bleeding, or fever, "
-            "please treat it as urgent and call the clinic right away (or emergency services if needed).\n\n"
+            "If this is severe pain, swelling, uncontrolled bleeding, or fever, please treat it as urgent and call the clinic "
+            "right away (or emergency services if needed).\n\n"
             "If you share your name + phone number, we can arrange an urgent callback."
         )
 
     # Insurance question
     if intent == "INSURANCE":
-        # Keep it relevant; ask for the procedure if missing
         if not proc:
             state["step"] = "TRIAGE"
             return (
-                "Pricing depends on the service and your insurance coverage. "
-                "We accept public insurance and private pay (demo).\n\n"
+                "Pricing depends on the service and your insurance coverage. We accept public insurance and private pay (demo).\n\n"
                 "Which service are you asking about (e.g., cleaning, filling, implant)?"
             )
-        else:
-            state["step"] = "TRIAGE"
-            return (
-                f"Coverage can vary by procedure and plan. For **{proc.replace('_',' ')}**, "
-                "we can confirm after a quick assessment and checking your insurance.\n\n"
-                "If you share your name + phone number and best time to reach you, we can arrange a callback with an estimate range."
-            )
+        state["step"] = "TRIAGE"
+        return (
+            f"Coverage can vary by procedure and plan. For **{proc.replace('_', ' ')}**, we can confirm after a quick assessment "
+            "and checking your insurance.\n\n"
+            "If you share your name + phone number and best time to reach you, we can arrange a callback with an estimated range."
+        )
 
     # Pricing question
     if intent == "PRICING":
@@ -356,7 +365,7 @@ def next_reply(state: Dict[str, Any], user_text: str) -> str:
             return "Sure — which treatment are you asking about (e.g., cleaning, filling, implant)?"
         state["step"] = "COLLECT_CONTACT"
         return (
-            f"For **{proc.replace('_',' ')}**, pricing depends on clinical assessment and case complexity.\n\n"
+            f"For **{proc.replace('_', ' ')}**, pricing depends on clinical assessment and case complexity.\n\n"
             "If you share your **name**, **phone number**, and **best time to call**, we can arrange a callback with an estimated range."
         )
 
@@ -381,7 +390,6 @@ def next_reply(state: Dict[str, Any], user_text: str) -> str:
     if state.get("step") in ["COLLECT_CONTACT", "READY_TO_HANDOFF"]:
         missing = [k for k in ["name", "phone", "best_time"] if not c.get(k)]
         if missing:
-            # Ask for the next missing item only
             field = missing[0]
             if field == "name":
                 return "To arrange a callback, what’s your name?"
@@ -395,7 +403,22 @@ def next_reply(state: Dict[str, Any], user_text: str) -> str:
 
     # Default
     state["step"] = "TRIAGE"
-    return "How can I help you today — is it about pricing, insurance, booking, or an urgent issue?"
+    return "How can I help you today — is it about opening hours, pricing, insurance, booking, or an urgent issue?"
+
+
+# -----------------------------
+# UI route (serves chat.html)
+# -----------------------------
+@app.get("/", response_class=HTMLResponse)
+def ui():
+    path = os.path.join(os.getcwd(), "chat.html")
+    if not os.path.exists(path):
+        return HTMLResponse(
+            "<h3>chat.html not found</h3><p>Put chat.html next to main.py (same folder) and refresh.</p>",
+            status_code=200
+        )
+    with open(path, "r", encoding="utf-8") as f:
+        return HTMLResponse(f.read(), status_code=200)
 
 
 # -----------------------------
@@ -405,29 +428,31 @@ def next_reply(state: Dict[str, Any], user_text: str) -> str:
 def chat(req: ChatRequest):
     state = get_or_init_state(req.session_id, req.prior_state)
 
-    # Keep a compact evidence trail (this improves tickets a lot)
-    state["details"].append(req.user_message.strip())
+    # Evidence trail (improves ticket quality)
+    msg = (req.user_message or "").strip()
+    if msg:
+        state["details"].append(msg)
 
-    # 1) NLU update
-    nlu = classify_intent_and_procedure(req.user_message)
+    # NLU update
+    nlu = classify_intent_and_procedure(msg)
     if nlu.get("intent"):
         state["intent"] = nlu["intent"]
     if nlu.get("procedure"):
         state["procedure"] = nlu["procedure"]
 
-    # Optional: set topic early to improve ticket quality
+    # Topic for tickets/debug
     state["topic"] = infer_topic(state)
 
-    # 2) Extract contact fields (your existing working function should go here)
-    state = update_collected_from_text(state, req.user_message)
+    # Extract contact fields
+    state = update_collected_from_text(state, msg)
 
-    # 3) Generate reply
-    reply_text = next_reply(state, req.user_message)
+    # Reply
+    reply_text = next_reply(state, msg)
 
-    # 4) Plan actions (agent planning)
+    # Plan actions
     planned_actions = plan_actions(state)
 
-    # 5) Execute actions (agent tool calls)
+    # Execute actions
     executed = agent.run_actions(req.session_id, state, planned_actions)
 
     # Pull ticket_id if created
@@ -436,12 +461,12 @@ def chat(req: ChatRequest):
         if e["type"] == "upsert_ticket" and e["ok"]:
             ticket_id = e["data"].get("ticket_id")
 
-    # If notify_staff ran, attach ticket_id to its data for traceability
+    # If notify_staff ran, attach ticket_id for traceability
     for e in executed:
         if e["type"] == "notify_staff" and e["ok"] and ticket_id and "ticket_id" not in e["data"]:
             e["data"]["ticket_id"] = ticket_id
 
-    # 6) Save session state
+    # Save
     save_state(req.session_id, state)
 
     return ChatResponse(
@@ -451,11 +476,7 @@ def chat(req: ChatRequest):
         actions_executed=executed,
         ticket_id=ticket_id
     )
-    
-@app.get("/", response_class=HTMLResponse)
-def chat_ui():
-    with open("chat.html", "r", encoding="utf-8") as f:
-        return f.read()
+
 
 # -----------------------------
 # Debug endpoints (demo)
@@ -467,3 +488,11 @@ def debug_tickets():
 @app.get("/debug/session/{session_id}")
 def debug_session(session_id: str):
     return {"session_id": session_id, "state": SESSIONS.get(session_id)}
+
+
+# -----------------------------
+# Health
+# -----------------------------
+@app.get("/health")
+def health():
+    return {"ok": True, "time": now_iso()}
