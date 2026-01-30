@@ -345,11 +345,23 @@ def plan_actions(state: Dict[str, Any]) -> List[Dict[str, Any]]:
 # Reply policy (safe + relevant)
 # -----------------------------
 def next_reply(state: Dict[str, Any], user_text: str) -> str:
+    """
+    Agent v1 reply policy.
+    - Deterministic
+    - Intent-driven
+    - Safe (no medical advice)
+    - Allows intent transitions (chatbot -> agent behavior)
+    """
+
     intent = state.get("intent")
     proc = state.get("procedure")
+    step = state.get("step")
+    collected = state.get("collected", {})
 
+    # -----------------------------
     # Opening hours (read-only info)
-    if intent == "OPENING_HOURS":
+    # -----------------------------
+    if intent == "OPENING_HOURS" and step == "TRIAGE":
         state["step"] = "TRIAGE"
         return (
             "Our typical opening hours are:\n"
@@ -359,86 +371,128 @@ def next_reply(state: Dict[str, Any], user_text: str) -> str:
             "Would you like to book an appointment or request a callback?"
         )
 
-    # Safety: medical advice / antibiotics
+    # -----------------------------
+    # Booking / appointment
+    # -----------------------------
+    if intent == "BOOK_APPOINTMENT":
+        state["step"] = "COLLECT_CONTACT"
+
+        missing = [k for k in ["name", "phone", "best_time"] if not collected.get(k)]
+        if missing:
+            field = missing[0]
+            if field == "name":
+                return (
+                    "Sure — I can help with booking an appointment.\n\n"
+                    "To get started, may I have your name?"
+                )
+            if field == "phone":
+                return "Thanks. What’s the best phone number to reach you?"
+            if field == "best_time":
+                return "When is the best time to contact you to confirm the appointment?"
+
+        state["step"] = "READY_TO_HANDOFF"
+        return "Perfect — I’ve noted your details and the team will contact you shortly to confirm the appointment."
+
+    # -----------------------------
+    # Medical advice (restricted)
+    # -----------------------------
     if intent == "MEDICAL_ADVICE":
         state["step"] = "LIMITED_RESPONSE"
         return (
-            "I can’t safely advise on antibiotics over chat. Antibiotics are only appropriate after a clinician "
-            "assesses your symptoms and history.\n\n"
-            "If you have fever, facial swelling, trouble swallowing/breathing, or severe pain, please seek urgent care.\n\n"
-            "If you share your name + phone number, we can arrange a clinician callback."
+            "I can’t safely provide medical advice over chat. Antibiotics or other treatments "
+            "can only be recommended after a clinician has assessed you.\n\n"
+            "If you have fever, facial swelling, trouble swallowing or breathing, or severe pain, "
+            "please seek urgent care.\n\n"
+            "If you’d like, you can share your name and phone number and we can arrange a clinician callback."
         )
 
+    # -----------------------------
     # Emergency
+    # -----------------------------
     if intent == "EMERGENCY":
         state["step"] = "READY_TO_HANDOFF"
         return (
-            "If this is severe pain, swelling, uncontrolled bleeding, or fever, please treat it as urgent and call the clinic "
-            "right away (or emergency services if needed).\n\n"
-            "If you share your name + phone number, we can arrange an urgent callback."
+            "If this is severe pain, swelling, uncontrolled bleeding, or fever, "
+            "please treat it as urgent and contact the clinic immediately "
+            "(or emergency services if needed).\n\n"
+            "If you share your name and phone number, we can arrange an urgent callback."
         )
 
-    # Insurance question
+    # -----------------------------
+    # Insurance
+    # -----------------------------
     if intent == "INSURANCE":
-        if not proc:
-            state["step"] = "TRIAGE"
-            return (
-                "Pricing depends on the service and your insurance coverage. We accept public insurance and private pay (demo).\n\n"
-                "Which service are you asking about (e.g., cleaning, filling, implant)?"
-            )
         state["step"] = "TRIAGE"
+        if not proc:
+            return (
+                "Insurance coverage depends on the type of treatment and your plan.\n\n"
+                "Which service are you asking about (for example: cleaning, filling, implant)?"
+            )
         return (
-            f"Coverage can vary by procedure and plan. For **{proc.replace('_', ' ')}**, we can confirm after a quick assessment "
-            "and checking your insurance.\n\n"
-            "If you share your name + phone number and best time to reach you, we can arrange a callback with an estimated range."
+            f"Coverage can vary by plan and procedure. For **{proc.replace('_', ' ')}**, "
+            "we can confirm details after a brief assessment and checking your insurance.\n\n"
+            "If you’d like, share your name and phone number and we can arrange a callback with more details."
         )
 
-    # Pricing question
+    # -----------------------------
+    # Pricing
+    # -----------------------------
     if intent == "PRICING":
         if not proc:
             state["step"] = "TRIAGE"
-            return "Sure — which treatment are you asking about (e.g., cleaning, filling, implant)?"
+            return "Sure — which treatment are you asking about (for example: cleaning, filling, implant)?"
+
         state["step"] = "COLLECT_CONTACT"
         return (
-            f"For **{proc.replace('_', ' ')}**, pricing depends on clinical assessment and case complexity.\n\n"
-            "If you share your **name**, **phone number**, and **best time to call**, we can arrange a callback with an estimated range."
+            f"Pricing for **{proc.replace('_', ' ')}** depends on clinical assessment and case complexity.\n\n"
+            "If you share your name, phone number, and best time to reach you, "
+            "we can arrange a callback with an estimated price range."
         )
 
+    # -----------------------------
     # Services
+    # -----------------------------
     if intent == "SERVICES":
         state["step"] = "TRIAGE"
         return (
-            "We offer:\n"
+            "We offer the following services:\n"
             "- Check-ups & consultations\n"
             "- Professional cleaning\n"
             "- Fillings\n"
             "- Root canal treatment (by assessment)\n"
-            "- Crowns/bridges\n"
+            "- Crowns & bridges\n"
             "- Implants (by assessment)\n"
             "- Kids dentistry\n"
             "- Emergency pain consultations\n\n"
-            "What do you need help with?"
+            "What would you like help with?"
         )
 
-    # If we are collecting contact: guide intelligently
-    c = state.get("collected", {})
-    if state.get("step") in ["COLLECT_CONTACT", "READY_TO_HANDOFF"]:
-        missing = [k for k in ["name", "phone", "best_time"] if not c.get(k)]
+    # -----------------------------
+    # Contact collection (generic)
+    # -----------------------------
+    if step in ["COLLECT_CONTACT", "READY_TO_HANDOFF"]:
+        missing = [k for k in ["name", "phone", "best_time"] if not collected.get(k)]
         if missing:
             field = missing[0]
             if field == "name":
-                return "To arrange a callback, what’s your name?"
+                return "To proceed, may I have your name?"
             if field == "phone":
-                return "Thanks — what’s the best phone number to reach you?"
+                return "Thanks. What’s the best phone number to reach you?"
             if field == "best_time":
-                return "When is the best time to call you (e.g., today afternoon, tomorrow morning)?"
-        else:
-            state["step"] = "READY_TO_HANDOFF"
-            return "Perfect — I’ll pass this to the team and they’ll call you at your requested time."
+                return "When is the best time to call you?"
 
-    # Default
+        state["step"] = "READY_TO_HANDOFF"
+        return "Thanks — I’ll pass this on to the team and they’ll contact you shortly."
+
+    # -----------------------------
+    # Default fallback
+    # -----------------------------
     state["step"] = "TRIAGE"
-    return "How can I help you today — is it about opening hours, pricing, insurance, booking, or an urgent issue?"
+    return (
+        "How can I help you today?\n"
+        "You can ask about opening hours, pricing, insurance, booking an appointment, or urgent issues."
+    )
+
 
 
 # -----------------------------
