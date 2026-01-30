@@ -81,40 +81,75 @@ def save_state(session_id: str, state: Dict[str, Any]) -> None:
 # VERY SIMPLE NLU (replace with your existing logic)
 # -----------------------------
 def classify_intent_and_procedure(text: str) -> Dict[str, Optional[str]]:
-    t = text.lower().strip()
+    t = (text or "").lower().strip()
 
-    # Intent detection
+    # -------- Intent detection (order matters) --------
+    # 1) High-risk / safety intents first
     if any(x in t for x in ["antibiotic", "antibiotics", "amoxicillin", "penicillin"]):
         intent = "MEDICAL_ADVICE"
-    elif any(x in t for x in ["emergency", "severe pain", "bleeding", "swollen", "swelling", "urgent"]):
+
+    elif any(x in t for x in ["emergency", "severe pain", "unbearable pain", "bleeding", "swollen", "swelling", "urgent"]):
         intent = "EMERGENCY"
-    elif any(x in t for x in ["opening", "opening hours", "open hours", "working hours", "hours", "when are you open"]):
+
+    # 2) Booking / scheduling (must come BEFORE opening hours, because "open" can appear in booking messages)
+    elif any(x in t for x in [
+        "book", "booking", "appointment", "make an appointment", "schedule", "set an appointment"
+    ]):
+        intent = "BOOK_APPOINTMENT"
+
+    # 3) Opening hours (read-only info)
+    elif any(x in t for x in [
+        "opening hours", "open hours", "working hours", "business hours",
+        "when are you open", "when do you open", "when do you close",
+        "opening time", "closing time", "hours"
+    ]):
         intent = "OPENING_HOURS"
-    elif "insurance" in t or "public insurance" in t or "private pay" in t or "private insurance" in t:
+
+    # 4) Insurance
+    elif any(x in t for x in [
+        "insurance", "public insurance", "private pay", "private insurance", "coverage", "insured"
+    ]):
         intent = "INSURANCE"
-    elif any(x in t for x in ["price", "cost", "how much", "pricing", "fee"]):
+
+    # 5) Pricing
+    elif any(x in t for x in [
+        "price", "cost", "how much", "pricing", "fee", "rates", "quote"
+    ]):
         intent = "PRICING"
-    elif any(x in t for x in ["do you offer", "services", "what do you do", "offer"]):
+
+    # 6) Services / offerings
+    elif any(x in t for x in [
+        "do you offer", "services", "what do you do", "offer", "treatments", "procedures"
+    ]):
         intent = "SERVICES"
+
     else:
         intent = None
 
-    # Procedure detection
+    # -------- Procedure detection --------
     procedure = None
-    if "implant" in t or "implants" in t:
+
+    if any(x in t for x in ["implant", "implants"]):
         procedure = "implant"
-    elif "cleaning" in t:
+    elif "cleaning" in t or "scale" in t or "scaling" in t:
         procedure = "cleaning"
-    elif "filling" in t or "cavity" in t:
+    elif any(x in t for x in ["filling", "fillings", "cavity"]):
         procedure = "filling"
-    elif "root canal" in t:
+    elif "root canal" in t or "endodont" in t:
         procedure = "root_canal"
-    elif "crown" in t or "bridge" in t:
+    elif any(x in t for x in ["crown", "crowns", "bridge", "bridges"]):
         procedure = "crown_bridge"
-    elif "check" in t or "consult" in t or "consultation" in t:
+    elif any(x in t for x in ["check-up", "checkup", "consult", "consultation", "examination"]):
         procedure = "consultation"
+    elif any(x in t for x in ["kids", "child", "children", "pediatric"]):
+        procedure = "kids_dentistry"
+    elif any(x in t for x in ["toothache", "pain", "emergency"]):
+        # only set if nothing else already matched
+        if procedure is None:
+            procedure = "emergency_consult"
 
     return {"intent": intent, "procedure": procedure}
+
 
 
 def update_collected_from_text(state: Dict[str, Any], text: str) -> Dict[str, Any]:
