@@ -1,3 +1,4 @@
+# main.py
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
@@ -5,19 +6,13 @@ from typing import Optional, Dict, Any, List, Literal
 from datetime import datetime
 import uuid
 import os
+import re
 
 app = FastAPI(title="Digital Frontdesk – Agent v1")
 
-# -----------------------------
-# In-memory stores (demo)
-# Replace with DB later
-# -----------------------------
 SESSIONS: Dict[str, Dict[str, Any]] = {}
 TICKETS: Dict[str, Dict[str, Any]] = {}
 
-# -----------------------------
-# Request/Response models
-# -----------------------------
 class ChatRequest(BaseModel):
     session_id: str
     user_message: str
@@ -34,31 +29,19 @@ class ChatResponse(BaseModel):
     ticket_id: Optional[str] = None
 
 
-# -----------------------------
-# Agent State
-# -----------------------------
 DEFAULT_STATE = {
     "step": "TRIAGE",  # TRIAGE -> COLLECT_CONTACT -> READY_TO_HANDOFF -> LIMITED_RESPONSE
-    "intent": None,    # PRICING, INSURANCE, SERVICES, EMERGENCY, MEDICAL_ADVICE, OPENING_HOURS
-    "procedure": None, # implant, cleaning, filling...
-    "topic": None,     # short phrase: "Implant pricing", "Insurance question" ...
-    "details": [],     # list of user utterances (evidence trail)
-    "collected": {
-        "name": None,
-        "phone": None,
-        "best_time": None
-    },
+    "intent": None,    # PRICING, INSURANCE, SERVICES, EMERGENCY, MEDICAL_ADVICE, OPENING_HOURS, BOOK_APPOINTMENT
+    "procedure": None,
+    "topic": None,
+    "details": [],
+    "collected": {"name": None, "phone": None, "best_time": None},
     "created_at": None,
     "updated_at": None
 }
 
-
-# -----------------------------
-# Utilities
-# -----------------------------
 def now_iso() -> str:
     return datetime.utcnow().isoformat(timespec="seconds") + "Z"
-
 
 def get_or_init_state(session_id: str, prior_state: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     if prior_state:
@@ -71,64 +54,38 @@ def get_or_init_state(session_id: str, prior_state: Optional[Dict[str, Any]]) ->
         state["updated_at"] = now_iso()
     return state
 
-
 def save_state(session_id: str, state: Dict[str, Any]) -> None:
     state["updated_at"] = now_iso()
     SESSIONS[session_id] = state
 
 
-# -----------------------------
-# VERY SIMPLE NLU (replace with your existing logic)
-# -----------------------------
 def classify_intent_and_procedure(text: str) -> Dict[str, Optional[str]]:
     t = (text or "").lower().strip()
 
-    # -------- Intent detection (order matters) --------
-    # 1) High-risk / safety intents first
+    # Intent detection (order matters)
     if any(x in t for x in ["antibiotic", "antibiotics", "amoxicillin", "penicillin"]):
         intent = "MEDICAL_ADVICE"
-
     elif any(x in t for x in ["emergency", "severe pain", "unbearable pain", "bleeding", "swollen", "swelling", "urgent"]):
         intent = "EMERGENCY"
-
-    # 2) Booking / scheduling (must come BEFORE opening hours, because "open" can appear in booking messages)
-    elif any(x in t for x in [
-        "book", "booking", "appointment", "make an appointment", "schedule", "set an appointment"
-    ]):
+    elif any(x in t for x in ["book", "booking", "appointment", "make an appointment", "schedule", "set an appointment"]):
         intent = "BOOK_APPOINTMENT"
-
-    # 3) Opening hours (read-only info)
     elif any(x in t for x in [
         "opening hours", "open hours", "working hours", "business hours",
         "when are you open", "when do you open", "when do you close",
         "opening time", "closing time", "hours"
     ]):
         intent = "OPENING_HOURS"
-
-    # 4) Insurance
-    elif any(x in t for x in [
-        "insurance", "public insurance", "private pay", "private insurance", "coverage", "insured"
-    ]):
+    elif any(x in t for x in ["insurance", "public insurance", "private pay", "private insurance", "coverage", "insured"]):
         intent = "INSURANCE"
-
-    # 5) Pricing
-    elif any(x in t for x in [
-        "price", "cost", "how much", "pricing", "fee", "rates", "quote"
-    ]):
+    elif any(x in t for x in ["price", "cost", "how much", "pricing", "fee", "rates", "quote"]):
         intent = "PRICING"
-
-    # 6) Services / offerings
-    elif any(x in t for x in [
-        "do you offer", "services", "what do you do", "offer", "treatments", "procedures"
-    ]):
+    elif any(x in t for x in ["do you offer", "services", "what do you do", "offer", "treatments", "procedures"]):
         intent = "SERVICES"
-
     else:
         intent = None
 
-    # -------- Procedure detection --------
+    # Procedure detection
     procedure = None
-
     if any(x in t for x in ["implant", "implants"]):
         procedure = "implant"
     elif "cleaning" in t or "scale" in t or "scaling" in t:
@@ -144,33 +101,62 @@ def classify_intent_and_procedure(text: str) -> Dict[str, Optional[str]]:
     elif any(x in t for x in ["kids", "child", "children", "pediatric"]):
         procedure = "kids_dentistry"
     elif any(x in t for x in ["toothache", "pain", "emergency"]):
-        # only set if nothing else already matched
         if procedure is None:
             procedure = "emergency_consult"
 
     return {"intent": intent, "procedure": procedure}
 
 
+def _looks_like_name(s: str) -> bool:
+    s = s.strip()
+    if not (1 <= len(s) <= 60):
+        return False
+    # Allow letters, spaces, hyphen, apostrophe
+    if not re.fullmatch(r"[A-Za-zÀ-ÖØ-öø-ÿ][A-Za-zÀ-ÖØ-öø-ÿ \-']*", s):
+        return False
+    # Avoid generic answers
+    banned = {"yes", "no", "okay", "ok", "sure", "thanks", "thank you"}
+    if s.lower() in banned:
+        return False
+    return True
+
 
 def update_collected_from_text(state: Dict[str, Any], text: str) -> Dict[str, Any]:
     """
-    Replace with your working extraction.
-    Keep it deterministic: only fill fields when confidently detected.
+    Deterministic extraction.
+    IMPORTANT: supports "Alex" as a name when we are explicitly asking for a name (COLLECT_CONTACT).
     """
-    t = text.strip()
+    t = (text or "").strip()
     low = t.lower()
 
-    # Name: "My name is Ali"
-    if state["collected"]["name"] is None and ("my name is" in low or "i am " in low):
-        if "my name is" in low:
-            name = t.split("is", 1)[1].strip()
-        else:
-            # crude: "I am Ali"
-            name = t.split("am", 1)[1].strip()
-        if 1 <= len(name) <= 60 and all(ch.isalpha() or ch in " -'" for ch in name):
-            state["collected"]["name"] = name
+    # --- If we're collecting contact info, treat short plain text as the requested field ---
+    if state.get("step") == "COLLECT_CONTACT":
+        c = state.get("collected", {})
+        if c.get("name") is None:
+            # If user just typed "Alex"
+            if _looks_like_name(t):
+                c["name"] = t
+                state["collected"] = c
+                return state
 
-    # Phone: digits (demo)
+    # Name patterns
+    if state["collected"]["name"] is None:
+        m = re.search(r"\bmy name is\b\s+(.+)$", low)
+        if m:
+            candidate = t[m.start():]  # use original casing
+            # Extract after "my name is" in original text
+            candidate = re.split(r"\bmy name is\b", candidate, flags=re.IGNORECASE)[-1].strip()
+            if _looks_like_name(candidate):
+                state["collected"]["name"] = candidate
+
+        if state["collected"]["name"] is None:
+            m2 = re.search(r"\bi am\b\s+(.+)$", low)
+            if m2:
+                candidate = re.split(r"\bi am\b", t, flags=re.IGNORECASE)[-1].strip()
+                if _looks_like_name(candidate):
+                    state["collected"]["name"] = candidate
+
+    # Phone: accept + and digits
     if state["collected"]["phone"] is None:
         digits = "".join(ch for ch in t if ch.isdigit() or ch == "+")
         if len("".join(ch for ch in digits if ch.isdigit())) >= 8:
@@ -182,21 +168,19 @@ def update_collected_from_text(state: Dict[str, Any], text: str) -> Dict[str, An
             "morning", "afternoon", "evening", "tomorrow", "today",
             "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"
         ]):
-            state["collected"]["best_time"] = t.strip()
+            state["collected"]["best_time"] = t
 
     return state
 
 
-# -----------------------------
-# Ticketing (tool target)
-# -----------------------------
 def infer_topic(state: Dict[str, Any]) -> str:
     intent = state.get("intent")
     proc = state.get("procedure")
 
     if intent == "OPENING_HOURS":
         return "Opening hours"
-
+    if intent == "BOOK_APPOINTMENT":
+        return "Appointment booking"
     if intent == "PRICING" and proc:
         return f"{proc.title()} pricing"
     if intent == "INSURANCE" and proc:
@@ -229,10 +213,6 @@ def build_summary(state: Dict[str, Any]) -> str:
 
 
 def upsert_ticket(session_id: str, state: Dict[str, Any]) -> str:
-    """
-    Create or update one ticket per session for demo.
-    Ticket includes WHAT the user asked + summary.
-    """
     existing = None
     for tid, t in TICKETS.items():
         if t.get("session_id") == session_id:
@@ -240,7 +220,6 @@ def upsert_ticket(session_id: str, state: Dict[str, Any]) -> str:
             break
 
     ticket_id = existing or str(uuid.uuid4())[:8]
-
     topic = state.get("topic") or infer_topic(state)
     summary = build_summary(state)
 
@@ -257,14 +236,10 @@ def upsert_ticket(session_id: str, state: Dict[str, Any]) -> str:
         "conversation_facts": state.get("details", [])[-10:],
         "status": "open" if state.get("step") != "RESOLVED" else "closed",
     }
-
     TICKETS[ticket_id] = ticket
     return ticket_id
 
 
-# -----------------------------
-# Tools + Agent Runner
-# -----------------------------
 ActionType = Literal["upsert_ticket", "notify_staff", "handoff_if_needed"]
 
 class ToolResult(BaseModel):
@@ -278,7 +253,6 @@ class Tools:
         return ToolResult(ok=True, data={"ticket_id": tid})
 
     def notify_staff(self, session_id: str, state: Dict[str, Any], ticket_id: Optional[str] = None, **kwargs) -> ToolResult:
-        # Demo: log-only. Replace with Slack/webhook/email later.
         return ToolResult(ok=True, data={"notified": True, "ticket_id": ticket_id})
 
     def handoff_if_needed(self, session_id: str, state: Dict[str, Any], **kwargs) -> ToolResult:
@@ -311,15 +285,7 @@ class AgentRunner:
 agent = AgentRunner()
 
 
-# -----------------------------
-# Planner (agent brain)
-# -----------------------------
 def plan_actions(state: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """
-    Agent v1 planning rules:
-    - Create/update ticket for meaningful clinical/admin intents (NOT opening hours).
-    - Notify staff only for READY_TO_HANDOFF or EMERGENCY / MEDICAL_ADVICE.
-    """
     actions = []
     intent = state.get("intent")
     proc = state.get("procedure")
@@ -327,7 +293,7 @@ def plan_actions(state: Dict[str, Any]) -> List[Dict[str, Any]]:
     has_contact_signal = any(collected.get(k) for k in ["name", "phone", "best_time"])
     meaningful = bool(intent or proc or state.get("topic") or state.get("details"))
 
-    # Do NOT create tickets for simple informational intents like opening hours
+    # No tickets for opening hours
     if intent != "OPENING_HOURS" and (meaningful or has_contact_signal):
         actions.append({"type": "upsert_ticket", "params": {}})
 
@@ -341,26 +307,12 @@ def plan_actions(state: Dict[str, Any]) -> List[Dict[str, Any]]:
     return actions
 
 
-# -----------------------------
-# Reply policy (safe + relevant)
-# -----------------------------
 def next_reply(state: Dict[str, Any], user_text: str) -> str:
-    """
-    Agent v1 reply policy.
-    - Deterministic
-    - Intent-driven
-    - Safe (no medical advice)
-    - Allows intent transitions (chatbot -> agent behavior)
-    """
-
     intent = state.get("intent")
     proc = state.get("procedure")
     step = state.get("step")
     collected = state.get("collected", {})
 
-    # -----------------------------
-    # Opening hours (read-only info)
-    # -----------------------------
     if intent == "OPENING_HOURS" and step == "TRIAGE":
         state["step"] = "TRIAGE"
         return (
@@ -371,31 +323,20 @@ def next_reply(state: Dict[str, Any], user_text: str) -> str:
             "Would you like to book an appointment or request a callback?"
         )
 
-    # -----------------------------
-    # Booking / appointment
-    # -----------------------------
     if intent == "BOOK_APPOINTMENT":
         state["step"] = "COLLECT_CONTACT"
-
         missing = [k for k in ["name", "phone", "best_time"] if not collected.get(k)]
         if missing:
             field = missing[0]
             if field == "name":
-                return (
-                    "Sure — I can help with booking an appointment.\n\n"
-                    "To get started, may I have your name?"
-                )
+                return "Sure — I can help with booking an appointment.\n\nTo get started, may I have your name?"
             if field == "phone":
-                return "Thanks. What’s the best phone number to reach you?"
+                return "Thanks, {name}. What’s the best phone number to reach you?".format(name=collected.get("name", ""))
             if field == "best_time":
                 return "When is the best time to contact you to confirm the appointment?"
-
         state["step"] = "READY_TO_HANDOFF"
         return "Perfect — I’ve noted your details and the team will contact you shortly to confirm the appointment."
 
-    # -----------------------------
-    # Medical advice (restricted)
-    # -----------------------------
     if intent == "MEDICAL_ADVICE":
         state["step"] = "LIMITED_RESPONSE"
         return (
@@ -406,9 +347,6 @@ def next_reply(state: Dict[str, Any], user_text: str) -> str:
             "If you’d like, you can share your name and phone number and we can arrange a clinician callback."
         )
 
-    # -----------------------------
-    # Emergency
-    # -----------------------------
     if intent == "EMERGENCY":
         state["step"] = "READY_TO_HANDOFF"
         return (
@@ -418,9 +356,6 @@ def next_reply(state: Dict[str, Any], user_text: str) -> str:
             "If you share your name and phone number, we can arrange an urgent callback."
         )
 
-    # -----------------------------
-    # Insurance
-    # -----------------------------
     if intent == "INSURANCE":
         state["step"] = "TRIAGE"
         if not proc:
@@ -434,14 +369,10 @@ def next_reply(state: Dict[str, Any], user_text: str) -> str:
             "If you’d like, share your name and phone number and we can arrange a callback with more details."
         )
 
-    # -----------------------------
-    # Pricing
-    # -----------------------------
     if intent == "PRICING":
         if not proc:
             state["step"] = "TRIAGE"
             return "Sure — which treatment are you asking about (for example: cleaning, filling, implant)?"
-
         state["step"] = "COLLECT_CONTACT"
         return (
             f"Pricing for **{proc.replace('_', ' ')}** depends on clinical assessment and case complexity.\n\n"
@@ -449,9 +380,6 @@ def next_reply(state: Dict[str, Any], user_text: str) -> str:
             "we can arrange a callback with an estimated price range."
         )
 
-    # -----------------------------
-    # Services
-    # -----------------------------
     if intent == "SERVICES":
         state["step"] = "TRIAGE"
         return (
@@ -467,9 +395,7 @@ def next_reply(state: Dict[str, Any], user_text: str) -> str:
             "What would you like help with?"
         )
 
-    # -----------------------------
-    # Contact collection (generic)
-    # -----------------------------
+    # Generic contact collection continuation (if intent got lost)
     if step in ["COLLECT_CONTACT", "READY_TO_HANDOFF"]:
         missing = [k for k in ["name", "phone", "best_time"] if not collected.get(k)]
         if missing:
@@ -480,24 +406,16 @@ def next_reply(state: Dict[str, Any], user_text: str) -> str:
                 return "Thanks. What’s the best phone number to reach you?"
             if field == "best_time":
                 return "When is the best time to call you?"
-
         state["step"] = "READY_TO_HANDOFF"
         return "Thanks — I’ll pass this on to the team and they’ll contact you shortly."
 
-    # -----------------------------
-    # Default fallback
-    # -----------------------------
     state["step"] = "TRIAGE"
     return (
         "How can I help you today?\n"
-        "You can ask about opening hours, pricing, insurance, booking an appointment, or urgent issues."
+        "You can ask about opening hours, pricing, insurance, or booking an appointment."
     )
 
 
-
-# -----------------------------
-# UI route (serves chat.html)
-# -----------------------------
 @app.get("/", response_class=HTMLResponse)
 def ui():
     path = os.path.join(os.getcwd(), "chat.html")
@@ -510,52 +428,48 @@ def ui():
         return HTMLResponse(f.read(), status_code=200)
 
 
-# -----------------------------
-# Main chat endpoint
-# -----------------------------
 @app.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest):
     state = get_or_init_state(req.session_id, req.prior_state)
 
-    # Evidence trail (improves ticket quality)
     msg = (req.user_message or "").strip()
     if msg:
         state["details"].append(msg)
 
-    # NLU update
+    # NLU
     nlu = classify_intent_and_procedure(msg)
-    if nlu.get("intent"):
+
+    # IMPORTANT: don't wipe intent during contact collection when nlu returns None
+    if nlu.get("intent") is not None:
         state["intent"] = nlu["intent"]
+    elif state.get("step") == "TRIAGE":
+        state["intent"] = state.get("intent")  # keep as-is (safe default)
+
     if nlu.get("procedure"):
         state["procedure"] = nlu["procedure"]
 
-    # Topic for tickets/debug
+    # Topic
     state["topic"] = infer_topic(state)
 
-    # Extract contact fields
+    # Extract contact (step-aware)
     state = update_collected_from_text(state, msg)
 
     # Reply
     reply_text = next_reply(state, msg)
 
-    # Plan actions
+    # Plan + execute actions
     planned_actions = plan_actions(state)
-
-    # Execute actions
     executed = agent.run_actions(req.session_id, state, planned_actions)
 
-    # Pull ticket_id if created
     ticket_id = None
     for e in executed:
         if e["type"] == "upsert_ticket" and e["ok"]:
             ticket_id = e["data"].get("ticket_id")
 
-    # If notify_staff ran, attach ticket_id for traceability
     for e in executed:
         if e["type"] == "notify_staff" and e["ok"] and ticket_id and "ticket_id" not in e["data"]:
             e["data"]["ticket_id"] = ticket_id
 
-    # Save
     save_state(req.session_id, state)
 
     return ChatResponse(
@@ -567,9 +481,6 @@ def chat(req: ChatRequest):
     )
 
 
-# -----------------------------
-# Debug endpoints (demo)
-# -----------------------------
 @app.get("/debug/tickets")
 def debug_tickets():
     return {"tickets": list(TICKETS.values())}
@@ -578,10 +489,6 @@ def debug_tickets():
 def debug_session(session_id: str):
     return {"session_id": session_id, "state": SESSIONS.get(session_id)}
 
-
-# -----------------------------
-# Health
-# -----------------------------
 @app.get("/health")
 def health():
     return {"ok": True, "time": now_iso()}
